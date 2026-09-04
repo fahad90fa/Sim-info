@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lookup result for <%= display %> · SIM Info</title>
+  <meta name="description" content="<%= names.length ? names.slice(0, 4).join(', ') : 'No names found' %> — phone lookup for <%= display %>">
+  <link rel="canonical" href="<%= baseUrl %>/share/<%= number %>">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="SIM Info">
+  <meta property="og:title" content="Lookup result for <%= display %>">
+  <meta property="og:description" content="<%= names.length ? names.slice(0, 4).join(', ') : 'No names found' %>">
+  <meta property="og:url" content="<%= baseUrl %>/share/<%= number %>">
+  <meta property="og:image" content="<%= baseUrl %>/image/<%= number %>">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Lookup result for <%= display %>">
+  <meta name="twitter:image" content="<%= baseUrl %>/image/<%= number %>">
+  <link rel="stylesheet" href="/print.css">
+</head>
+<body class="share-page">
+  <main class="sheet">
+    <header class="sheet-header">
+      <p class="brand">SIM Info · Phone Lookup</p>
+      <h1 class="number"><%= display %></h1>
+    </header>
+    <img class="card-preview" src="/image/<%= number %>" width="1200" height="630" alt="Social card for <%= display %>">
+    <p class="actions">
+      <a class="button" href="/?number=<%= number %>">Open in the app</a>
+      <a class="button secondary" href="/image/<%= number %>?download=1">Download image</a>
+      <a class="button secondary" href="/print/<%= number %>">Printable version</a>
+    </p>
+  </main>
+</body>
+</html>

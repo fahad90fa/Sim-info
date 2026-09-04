@@ -1,0 +1,37 @@
+services:
+  app:
+    build: .
+    image: sim-info:latest
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3000}:3000"
+    env_file:
+      - .env
+    environment:
+      # Inside the compose network the app talks to the redis service below.
+      REDIS_URL: redis://redis:6379
+      PORT: "3000"
+      TRUST_PROXY: "${TRUST_PROXY:-0}"
+    volumes:
+      - image-cache:/app/server/cache/images
+    depends_on:
+      redis:
+        condition: service_healthy
+    # Chromium needs a bit more shared memory than Docker's 64MB default.
+    shm_size: "512mb"
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "60", "1", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  image-cache:
+  redis-data:

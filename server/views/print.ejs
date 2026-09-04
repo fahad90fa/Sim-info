@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Lookup result for <%= display %></title>
+  <link rel="stylesheet" href="/print.css">
+  <% if (autoPrint) { %><script src="/print.js" defer></script><% } %>
+</head>
+<body class="print-page">
+  <main class="sheet">
+    <header class="sheet-header">
+      <p class="brand">SIM Info · Phone Lookup</p>
+      <h1 class="number"><%= display %></h1>
+      <p class="meta">
+        <% if (country) { %><span><%= country %></span> · <% } %>
+        <span><%= number %></span>
+      </p>
+    </header>
+
+    <section class="section">
+      <h2>Names (<%= names.length %>)</h2>
+      <% if (names.length) { %>
+        <ol class="names">
+          <% names.forEach(function (name) { %>
+            <li><%= name %></li>
+          <% }); %>
+        </ol>
+      <% } else { %>
+        <p class="empty">No names were found for this number.</p>
+      <% } %>
+    </section>
+
+    <section class="section">
+      <h2>Images (<%= images.length %>)</h2>
+      <% if (images.length) { %>
+        <div class="images">
+          <% images.forEach(function (src, i) { %>
+            <figure>
+              <img src="<%= src %>" alt="Image <%= i + 1 %> for <%= display %>" loading="eager">
+              <figcaption><%= src %></figcaption>
+            </figure>
+          <% }); %>
+        </div>
+      <% } else { %>
+        <p class="empty">No images were found for this number.</p>
+      <% } %>
+    </section>
+
+    <footer class="sheet-footer">
+      <p>Generated <%= new Date(fetchedAt).toUTCString() %> · <%= baseUrl %>/share/<%= number %></p>
+    </footer>
+  </main>
+</body>
+</html>
