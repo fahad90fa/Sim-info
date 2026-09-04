@@ -7,6 +7,8 @@ import { config } from './config.js';
 import { createApiRouter } from './routes/api.js';
 import { createPagesRouter } from './routes/pages.js';
 import { createImageRouter } from './routes/image.js';
+import { createLazyCache } from './lib/cache.js';
+import { pageResponder, assets } from './lib/templates.js';
 import { logger } from './lib/logger.js';
 
 /**
@@ -16,9 +18,7 @@ export function createApp({ cache }) {
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', config.trustProxy);
-  app.set('view engine', 'ejs');
-  app.set('views', config.paths.views);
-  app.set('view cache', config.isProduction);
+  app.use(pageResponder);
 
   app.use(
     helmet({
@@ -48,8 +48,13 @@ export function createApp({ cache }) {
   app.use(createPagesRouter({ cache }));
   app.use(createImageRouter({ cache }));
 
-  // Static assets for the server-rendered pages (print.css, print.js).
-  app.use(express.static(config.paths.public, { maxAge: config.isProduction ? '1d' : 0 }));
+  // Assets for the server-rendered pages, served from memory (see lib/templates.js).
+  for (const [name, asset] of Object.entries(assets)) {
+    app.get(`/${name}`, (_req, res) => {
+      res.set('Cache-Control', config.isProduction ? 'public, max-age=86400' : 'no-cache');
+      res.type(asset.type).send(asset.body);
+    });
+  }
 
   // Built React client (client/dist) when present; SPA fallback to index.html.
   const indexHtml = path.join(config.paths.clientDist, 'index.html');
@@ -57,7 +62,7 @@ export function createApp({ cache }) {
     app.use(express.static(config.paths.clientDist, { maxAge: config.isProduction ? '1y' : 0, index: false }));
     app.get(/^\/(?!api\/|print\/|share\/|image\/).*/, (_req, res) => {
       res.set('Cache-Control', 'no-cache');
-      res.sendFile(indexHtml);
+      res.sendFile(indexHtml, { dotfiles: 'allow' });
     });
   } else {
     app.get('/', (_req, res) => {
@@ -69,15 +74,23 @@ export function createApp({ cache }) {
   }
 
   app.use((_req, res) => {
-    res.status(404).render('error', { title: 'Not found', message: 'That page does not exist.' });
+    res.status(404).page('error', { title: 'Not found', message: 'That page does not exist.' });
   });
 
   // eslint-disable-next-line no-unused-vars
   app.use((err, _req, res, _next) => {
     logger.error('unhandled_error', { message: err.message, stack: err.stack });
     if (res.headersSent) return;
-    res.status(500).render('error', { title: 'Server error', message: 'Something went wrong.' });
+    res.status(500).page('error', { title: 'Server error', message: 'Something went wrong.' });
   });
 
   return app;
 }
+
+/**
+ * The application instance used by serverless entrypoints (api/index.js and
+ * Vercel's Express preset, which imports this file directly and expects the
+ * app as the default export). The cache backend connects on first use.
+ */
+export const app = createApp({ cache: createLazyCache() });
+export default app;

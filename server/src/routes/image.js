@@ -2,9 +2,8 @@
  * GET /image/:number – 1200x630 PNG social card for a lookup result.
  */
 import { Router } from 'express';
-import ejs from 'ejs';
-import path from 'node:path';
 import { parsePhone, formatPhone, guessCountry } from '../lib/phone.js';
+import { render } from '../lib/templates.js';
 import { lookupNumber, LookupError } from '../lib/lookup.js';
 import { imageLimiter } from '../middleware/rateLimit.js';
 import { renderHtmlToPng, getCachedImage, storeImage, CARD_WIDTH, CARD_HEIGHT } from '../lib/imageRenderer.js';
@@ -14,9 +13,8 @@ import { logger } from '../lib/logger.js';
 const MAX_NAMES_ON_CARD = 8;
 
 export async function buildCardHtml(number, result) {
-  const template = path.join(config.paths.views, 'card.ejs');
   const names = result.names.slice(0, MAX_NAMES_ON_CARD);
-  return ejs.renderFile(template, {
+  return render('card', {
     number,
     display: formatPhone(number),
     country: guessCountry(number),

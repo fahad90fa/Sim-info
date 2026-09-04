@@ -22,7 +22,7 @@ export const pageLimiter = rateLimit({
   ...base,
   limit: config.rateLimit.imageMax,
   handler: (_req, res) => {
-    res.status(429).render('error', { title: 'Too many requests', message });
+    res.status(429).page('error', { title: 'Too many requests', message });
   },
 });
 

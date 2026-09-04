@@ -78,3 +78,41 @@ export async function createCache(options = {}) {
   logger.info('cache_ready', { kind: 'memory' });
   return cache;
 }
+
+/**
+ * A cache whose backend is created on first use. Lets the Express app be
+ * built synchronously (serverless entrypoints must export the app at module
+ * load) while still supporting Redis, which needs an async connect.
+ */
+export function createLazyCache(options = {}) {
+  let ready = null;
+  const backend = () => {
+    if (!ready) {
+      ready = createCache(options).catch((err) => {
+        ready = null; // retry on the next call
+        throw err;
+      });
+    }
+    return ready;
+  };
+  return {
+    get kind() {
+      return 'lazy';
+    },
+    async get(key) {
+      return (await backend()).get(key);
+    },
+    async set(key, value, ttl) {
+      return (await backend()).set(key, value, ttl);
+    },
+    async del(key) {
+      return (await backend()).del(key);
+    },
+    async close() {
+      if (!ready) return;
+      const cache = await ready.catch(() => null);
+      ready = null;
+      if (cache) await cache.close();
+    },
+  };
+}

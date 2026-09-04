@@ -65,7 +65,7 @@ More screenshots (mobile layout, print page) are in [`docs/screenshots`](docs/sc
 │   │   ├── routes/         # api.js (/api/lookup), pages.js (/print, /share), image.js (/image)
 │   │   ├── lib/            # lookup client, cache, Puppeteer renderer, phone utils, logger
 │   │   └── middleware/     # rate limiters
-│   ├── views/              # print.ejs, share.ejs, card.ejs (social card), error.ejs
+│   ├── templates/          # print.ejs, share.ejs, card.ejs (social card), error.ejs
 │   ├── public/             # print.css, print.js
 │   └── test/               # node:test suites
 ├── api/index.js            # Vercel serverless entry (wraps the Express app)
@@ -110,16 +110,26 @@ TEST_IMAGE=1 npm test    # also renders a real PNG with Chromium
 
 ## Deploying to Vercel
 
-The repo is Vercel‑ready: `vercel.json` builds the React client as static files and
-routes everything else (`/api/*`, `/print/*`, `/share/*`, `/image/*`) to one serverless
-function in `api/index.js`, which wraps the same Express app used locally.
+The repo deploys to Vercel with either **Root Directory** setting. Both layouts were
+verified with a local `vercel build` and Vercel's own function launcher logic.
 
-1. Import the GitHub repo in Vercel. Leave **Root Directory** at the repository root
-   (not `server/`), and keep the framework preset as **Other**. `vercel.json` supplies
-   the build command (`npm run build`) and output directory (`client/dist`).
-2. Add environment variables in the Vercel dashboard (Project → Settings →
-   Environment Variables). The committed `.env` file is **not** read at runtime on
-   Vercel. Recommended:
+**Option A – Root Directory = repository root (recommended).** `vercel.json` pins the
+framework preset to *Other*, builds the React client to `client/dist` as static files,
+and rewrites every other path (`/api/*`, `/print/*`, `/share/*`, `/image/*`) to one
+serverless function, `api/index.js`, which exports the Express app.
+
+**Option B – Root Directory = `server`.** Vercel auto-detects Express and uses
+`server/src/app.js` (its default export is the app). `server/vercel.json` builds the
+client from the sibling folder, and the function serves the SPA itself. This requires
+the project setting *Include source files outside of the Root Directory* to stay
+enabled (the default).
+
+Either way:
+
+1. Import the GitHub repo in Vercel and keep the settings above. Do **not** pick a
+   different framework preset by hand.
+2. Add environment variables under Project → Settings → Environment Variables. The
+   committed `.env` file is **not** read at runtime on Vercel. Recommended:
 
    | Variable | Value |
    | --- | --- |
@@ -134,9 +144,14 @@ function in `api/index.js`, which wraps the same Express app used locally.
    per instance. A colour emoji font is downloaded to `/tmp/fonts` on cold start; set
    `CARD_EMOJI_FONT_URL` to an empty string to skip that.
 
-Notes for serverless: `TRUST_PROXY` defaults to `1` and `IMAGE_CACHE_DIR` falls back
-to `/tmp` automatically when `VERCEL` or an AWS Lambda variable is present. Rate limits
-are per function instance. The function's `maxDuration` is 60 s in `vercel.json`.
+Notes for serverless: the function entrypoints export the Express app synchronously
+(Vercel's launcher needs a function export or a `listen()` call at import time) and the
+cache backend connects on the first request. `TRUST_PROXY` defaults to `1` and
+`IMAGE_CACHE_DIR` falls back to `/tmp` automatically when `VERCEL` or an AWS Lambda
+variable is present. Rate limits are per function instance. `maxDuration` is 60 s.
+
+If a deployment shows `FUNCTION_INVOCATION_FAILED`, open the deployment's *Functions*
+log in the Vercel dashboard: the first log line names the thrown error.
 
 ## Docker
 

@@ -49,7 +49,7 @@ export const config = {
   paths: {
     serverRoot,
     repoRoot,
-    views: path.join(serverRoot, 'views'),
+    templates: path.join(serverRoot, 'templates'),
     public: path.join(serverRoot, 'public'),
     clientDist: path.join(repoRoot, 'client', 'dist'),
     imageCacheDir: resolveImageCacheDir(),

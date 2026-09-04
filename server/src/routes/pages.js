@@ -22,12 +22,12 @@ export function createPagesRouter({ cache }) {
   const loadOrRender = async (req, res, view, extra = {}) => {
     const parsed = parsePhone(req.params.number);
     if (!parsed.ok) {
-      return res.status(400).render('error', { title: 'Invalid number', message: parsed.message });
+      return res.status(400).page('error', { title: 'Invalid number', message: parsed.message });
     }
     const { number } = parsed;
     try {
       const result = await lookupNumber(number, cache);
-      return res.render(view, {
+      return res.page(view, {
         number,
         display: formatPhone(number),
         country: guessCountry(number),
@@ -40,7 +40,7 @@ export function createPagesRouter({ cache }) {
     } catch (err) {
       const status = err instanceof LookupError ? err.status : 500;
       const message = err instanceof LookupError ? err.message : 'Lookup failed';
-      return res.status(status).render('error', { title: 'Lookup failed', message });
+      return res.status(status).page('error', { title: 'Lookup failed', message });
     }
   };
 

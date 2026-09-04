@@ -5,3 +5,4 @@ server/logs/
 .env
 *.log
 .DS_Store
+.vercel/

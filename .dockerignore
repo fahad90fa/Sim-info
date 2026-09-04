@@ -7,3 +7,4 @@ server/logs
 .env
 *.log
 docs
+.vercel
