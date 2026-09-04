@@ -11,7 +11,9 @@ import { config } from '../config.js';
 
 function baseUrl(req) {
   if (config.publicBaseUrl) return config.publicBaseUrl;
-  return `${req.protocol}://${req.get('host')}`;
+  // req.protocol / req.host honour X-Forwarded-Proto / X-Forwarded-Host when
+  // `trust proxy` is enabled (it is by default on Vercel / Lambda).
+  return `${req.protocol}://${req.host}`;
 }
 
 export function createPagesRouter({ cache }) {

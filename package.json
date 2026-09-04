@@ -2,6 +2,7 @@
   "name": "sim-info",
   "version": "1.0.0",
   "private": true,
+  "type": "module",
   "description": "Phone number lookup (Pakistan / India) with printable results and shareable OG-card images",
   "workspaces": [
     "server",
@@ -17,6 +18,6 @@
     "lint": "npm run lint --workspace=server && npm run lint --workspace=client"
   },
   "engines": {
-    "node": ">=20"
+    "node": "22.x"
   }
 }

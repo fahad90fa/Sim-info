@@ -8,6 +8,7 @@
  */
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { config } from '../config.js';
 import { logger } from './logger.js';
@@ -41,6 +42,56 @@ function findPlaywrightChromium() {
   return null;
 }
 
+/**
+ * The Lambda Chromium build ships only Open Sans, and its fontconfig scans
+ * /tmp/fonts at launch. Download a colour emoji font there (once per instance)
+ * so names such as "Fahad ☠️" render on the card.
+ */
+async function ensureServerlessEmojiFont() {
+  const url = config.puppeteer.emojiFontUrl;
+  if (!url) return;
+  let file;
+  try {
+    const name = path.basename(new URL(url).pathname) || 'emoji.ttf';
+    file = path.join(os.tmpdir(), 'fonts', name);
+  } catch {
+    logger.warn('serverless_emoji_font_invalid_url', { url });
+    return;
+  }
+  if (fsSync.existsSync(file)) return;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15_000);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const buffer = Buffer.from(await res.arrayBuffer());
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(`${file}.tmp`, buffer);
+    await fs.rename(`${file}.tmp`, file);
+    logger.info('serverless_emoji_font_ready', { file, bytes: buffer.length });
+  } catch (err) {
+    logger.warn('serverless_emoji_font_failed', { message: err.message });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * On Vercel / AWS Lambda use the @sparticuz/chromium build (a Chromium binary
+ * packaged for Lambda-like environments). Returns null elsewhere.
+ */
+async function resolveServerlessChromium() {
+  if (!config.isServerless) return null;
+  try {
+    const { default: chromium } = await import('@sparticuz/chromium');
+    await ensureServerlessEmojiFont();
+    return { executablePath: await chromium.executablePath(), args: chromium.args };
+  } catch (err) {
+    logger.warn('serverless_chromium_unavailable', { message: err.message });
+    return null;
+  }
+}
+
 export async function resolveExecutablePath() {
   if (config.puppeteer.executablePath) return config.puppeteer.executablePath;
   for (const candidate of CANDIDATE_BINARIES) {
@@ -66,7 +117,8 @@ async function getBrowser() {
     browserPromise = null;
   }
   browserPromise = (async () => {
-    const executablePath = await resolveExecutablePath();
+    const serverless = config.puppeteer.executablePath ? null : await resolveServerlessChromium();
+    const executablePath = serverless?.executablePath ?? (await resolveExecutablePath());
     if (!executablePath) {
       throw new Error(
         'No Chrome/Chromium binary found. Set PUPPETEER_EXECUTABLE_PATH or install Chromium.',
@@ -77,6 +129,7 @@ async function getBrowser() {
       executablePath,
       headless: true,
       args: [
+        ...(serverless?.args ?? []),
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',

@@ -46,7 +46,7 @@ More screenshots (mobile layout, print page) are in [`docs/screenshots`](docs/sc
 | Frontend | React 19, Vite 7, Tailwind CSS 4 |
 | Cache | Redis (ioredis) or in‑memory `node-cache` |
 | Images | Puppeteer (`puppeteer-core`) + system Chromium |
-| Deployment | Dockerfile (multi‑stage) + `docker-compose.yml` with Redis |
+| Deployment | Vercel (serverless, `api/index.js` + `vercel.json`) or Dockerfile + `docker-compose.yml` with Redis |
 
 ## Project layout
 
@@ -68,10 +68,12 @@ More screenshots (mobile layout, print page) are in [`docs/screenshots`](docs/sc
 │   ├── views/              # print.ejs, share.ejs, card.ejs (social card), error.ejs
 │   ├── public/             # print.css, print.js
 │   └── test/               # node:test suites
+├── api/index.js            # Vercel serverless entry (wraps the Express app)
 ├── docs/screenshots/
 ├── Dockerfile
 ├── docker-compose.yml
-└── .env.example
+├── vercel.json
+└── .env                    # sample configuration (edit for local / Docker use)
 ```
 
 ## Quick start (local)
@@ -82,7 +84,7 @@ Requirements: Node.js 20+ and a Chrome/Chromium binary for image generation
 
 ```bash
 git clone <this repo> && cd sim-info
-cp .env.example .env          # adjust if needed
+# edit .env if needed (it ships with sensible defaults)
 npm install                   # installs server + client workspaces
 
 # Development: Express on :3000 and Vite dev server on :5173 (with API proxy)
@@ -106,10 +108,40 @@ npm test                 # unit + HTTP integration tests (mock upstream, no brow
 TEST_IMAGE=1 npm test    # also renders a real PNG with Chromium
 ```
 
+## Deploying to Vercel
+
+The repo is Vercel‑ready: `vercel.json` builds the React client as static files and
+routes everything else (`/api/*`, `/print/*`, `/share/*`, `/image/*`) to one serverless
+function in `api/index.js`, which wraps the same Express app used locally.
+
+1. Import the GitHub repo in Vercel. Leave **Root Directory** at the repository root
+   (not `server/`), and keep the framework preset as **Other**. `vercel.json` supplies
+   the build command (`npm run build`) and output directory (`client/dist`).
+2. Add environment variables in the Vercel dashboard (Project → Settings →
+   Environment Variables). The committed `.env` file is **not** read at runtime on
+   Vercel. Recommended:
+
+   | Variable | Value |
+   | --- | --- |
+   | `REDIS_URL` | A hosted Redis URL (e.g. Upstash `rediss://…`). Without it each function instance keeps its own in‑memory cache, so cache hits are rare and the 7‑day TTL is not meaningful. |
+   | `LOOKUP_API_URL` | Optional override of the upstream API |
+   | `PUBLIC_BASE_URL` | Optional; leave unset and the request's host is used for `og:image` |
+
+3. Deploy. Image cards are rendered with
+   [`@sparticuz/chromium`](https://github.com/Sparticuz/chromium), a Chromium build
+   for Lambda‑style runtimes, extracted to `/tmp` on the first render (a cold render
+   takes roughly 4–6 s, later ones under a second). Generated PNGs are cached in `/tmp`
+   per instance. A colour emoji font is downloaded to `/tmp/fonts` on cold start; set
+   `CARD_EMOJI_FONT_URL` to an empty string to skip that.
+
+Notes for serverless: `TRUST_PROXY` defaults to `1` and `IMAGE_CACHE_DIR` falls back
+to `/tmp` automatically when `VERCEL` or an AWS Lambda variable is present. Rate limits
+are per function instance. The function's `maxDuration` is 60 s in `vercel.json`.
+
 ## Docker
 
 ```bash
-cp .env.example .env
+# edit .env as needed
 docker compose up --build -d
 # open http://localhost:3000
 ```
@@ -132,13 +164,14 @@ origin so `og:image` URLs are absolute.
 
 ## Configuration
 
-All settings live in `.env` (see [`.env.example`](.env.example)).
+All settings live in [`.env`](.env) for local and Docker runs; on Vercel use the
+project's environment variables instead.
 
 | Variable | Default | Description |
 | --- | --- | --- |
 | `PORT` | `3000` | HTTP port |
 | `NODE_ENV` | `development` | `production` enables view caching and long static cache headers |
-| `TRUST_PROXY` | `0` | Express `trust proxy` setting (`1`, `true`, or a list like `loopback, 10.0.0.0/8`) |
+| `TRUST_PROXY` | `0` (`1` on Vercel/Lambda) | Express `trust proxy` setting (`1`, `true`, or a list like `loopback, 10.0.0.0/8`) |
 | `PUBLIC_BASE_URL` | request origin | Absolute origin used in Open Graph tags |
 | `CORS_ORIGIN` | empty | Comma‑separated origins allowed to call `/api` cross‑origin |
 | `LOOKUP_API_URL` | `https://7u6959.af7u76.workers.dev/` | Upstream API |
@@ -146,13 +179,14 @@ All settings live in `.env` (see [`.env.example`](.env.example)).
 | `LOOKUP_MOCK` | `false` | Serve fixture data instead of calling upstream |
 | `CACHE_TTL_SECONDS` | `604800` (7 days) | Lookup result TTL |
 | `REDIS_URL` | empty | e.g. `redis://redis:6379`; empty = in‑memory cache |
-| `IMAGE_CACHE_DIR` | `./cache/images` | Where PNG cards are stored |
+| `IMAGE_CACHE_DIR` | `./cache/images` (`/tmp/sim-info-images` on Vercel/Lambda) | Where PNG cards are stored |
 | `IMAGE_CACHE_TTL_SECONDS` | `604800` | Image TTL |
 | `RATE_LIMIT_WINDOW_MS` | `60000` | Rate‑limit window |
 | `RATE_LIMIT_MAX` | `10` | Lookups per window per IP |
 | `IMAGE_RATE_LIMIT_MAX` | `20` | `/image`, `/print`, `/share` requests per window per IP |
 | `PUPPETEER_EXECUTABLE_PATH` | auto‑detect | Chrome/Chromium binary |
 | `IMAGE_RENDER_CONCURRENCY` | `2` | Max simultaneous headless renders |
+| `CARD_EMOJI_FONT_URL` | Noto Color Emoji from GitHub | Serverless only: emoji font downloaded to `/tmp/fonts`; empty disables |
 | `LOG_FILE` | empty | Append lookup analytics as JSON lines to this file |
 
 ## HTTP API
