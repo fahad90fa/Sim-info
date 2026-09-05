@@ -5,9 +5,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import dotenv from 'dotenv';
 
 const serverRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PROBE = `
@@ -28,13 +30,14 @@ function probe(extraEnv) {
 }
 
 test('local runs load the repo .env', () => {
+  const dotenvFile = path.join(serverRoot, '..', '.env');
+  const fromFile = dotenv.parse(fs.readFileSync(dotenvFile));
+  assert.ok(fromFile.NODE_ENV, 'fixture: the repo .env is expected to set NODE_ENV');
   const c = probe({});
   assert.equal(c.isServerless, false);
-  assert.equal(c.trustProxy, 0);
-  // NODE_ENV=production is only in .env (the code default is development), so
-  // this proves dotenv actually ran.
-  assert.equal(c.nodeEnv, 'production');
-  assert.equal(c.isProduction, true);
+  // Whatever .env says must be what config saw (the code default is "development").
+  assert.equal(c.nodeEnv, fromFile.NODE_ENV);
+  assert.equal(c.trustProxy, Number(fromFile.TRUST_PROXY || 0));
 });
 
 test('on Vercel the committed .env is ignored and serverless defaults apply', () => {
@@ -48,7 +51,8 @@ test('on Vercel the committed .env is ignored and serverless defaults apply', ()
 });
 
 test('serverless ignores non-/tmp IMAGE_CACHE_DIR and LOG_FILE but honours /tmp paths', () => {
-  const bad = probe({ VERCEL: '1', IMAGE_CACHE_DIR: './cache/images', LOG_FILE: './logs/lookups.log' });
+  // Absolute non-temp paths so the check does not depend on where the checkout lives.
+  const bad = probe({ VERCEL: '1', IMAGE_CACHE_DIR: '/var/task/server/cache/images', LOG_FILE: '/srv/logs/lookups.log' });
   assert.ok(bad.imageCacheDir.startsWith(os.tmpdir()));
   assert.equal(bad.logFile, null);
   const good = probe({ VERCEL: '1', IMAGE_CACHE_DIR: path.join(os.tmpdir(), 'x'), LOG_FILE: path.join(os.tmpdir(), 'y', 'l.log') });

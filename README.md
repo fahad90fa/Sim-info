@@ -87,7 +87,8 @@ git clone <this repo> && cd sim-info
 # edit .env if needed (it ships with sensible defaults)
 npm install                   # installs server + client workspaces
 
-# Development: Express on :3000 and Vite dev server on :5173 (with API proxy)
+# Development: Express on :3000 and Vite dev server on :5173 (with API proxy).
+# The server runs in development mode here regardless of NODE_ENV in .env.
 npm run dev
 # open http://localhost:5173
 
@@ -156,7 +157,9 @@ cache backend connects on the first request. `TRUST_PROXY` defaults to `1`,
 `IMAGE_CACHE_DIR` and `LOG_FILE` are only honoured under `/tmp`, and `.env` files are
 skipped whenever `VERCEL` or an AWS Lambda variable is present. Rate limits are per
 function instance. Both layouts set `maxDuration` to 60 s; a cold image render
-(Chromium extraction, browser launch, emoji-font download) takes roughly 5 s. The
+(Chromium extraction, browser launch, font downloads) takes roughly 5 s. If a font
+download fails, cards are still served but not cached, and the download is retried
+after five minutes. The
 install commands pass `--include=dev` so a `NODE_ENV=production` build variable
 cannot skip the client's build tooling.
 
@@ -195,7 +198,7 @@ project's environment variables instead.
 | Variable | Default | Description |
 | --- | --- | --- |
 | `PORT` | `3000` | HTTP port |
-| `NODE_ENV` | `development` | `production` precompiles templates once and sends long cache headers for static assets; in development templates and `print.css` are re-read on every request |
+| `NODE_ENV` | `development` (`production` on Vercel/Lambda) | `production` precompiles templates once and sends long cache headers for static assets; in development templates and `print.css` are re-read on every request. `npm run dev` always forces `development` |
 | `TRUST_PROXY` | `0` (`1` on Vercel/Lambda) | Express `trust proxy` setting (`1`, `true`, or a list like `loopback, 10.0.0.0/8`) |
 | `PUBLIC_BASE_URL` | request origin | Absolute origin used in Open Graph tags |
 | `CORS_ORIGIN` | empty | Comma‑separated origins allowed to call `/api` cross‑origin |
@@ -206,12 +209,14 @@ project's environment variables instead.
 | `REDIS_URL` | empty | e.g. `redis://redis:6379`; empty = in‑memory cache |
 | `IMAGE_CACHE_DIR` | `./cache/images` (`/tmp/sim-info-images` on Vercel/Lambda) | Where PNG cards are stored |
 | `IMAGE_CACHE_TTL_SECONDS` | `604800` | Image TTL |
+| `IMAGE_CACHE_MAX_FILES` | `200` | Cap on cached PNG files on disk, oldest evicted first (`0` = unlimited) |
 | `RATE_LIMIT_WINDOW_MS` | `60000` | Rate‑limit window |
 | `RATE_LIMIT_MAX` | `10` | Lookups per window per IP |
 | `IMAGE_RATE_LIMIT_MAX` | `20` | `/image`, `/print`, `/share` requests per window per IP |
 | `PUPPETEER_EXECUTABLE_PATH` | auto‑detect | Chrome/Chromium binary |
 | `IMAGE_RENDER_CONCURRENCY` | `2` | Max simultaneous headless renders |
 | `CARD_FONT_URLS` | Noto Color Emoji, Noto Sans Arabic, Noto Sans Devanagari (GitHub) | Serverless only: fonts downloaded to `/tmp/fonts` at cold start so emoji, Urdu and Hindi names render on cards; empty disables |
+| `CARD_FONT_RETRY_MS` | `300000` | Serverless only: wait before retrying a failed font download; a successful retry relaunches the browser so the fonts take effect |
 | `LOG_FILE` | empty | Append lookup analytics as JSON lines to this file (on Vercel/Lambda only paths under `/tmp` are honoured) |
 
 ## HTTP API

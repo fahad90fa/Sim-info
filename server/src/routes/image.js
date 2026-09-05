@@ -6,7 +6,7 @@ import { parsePhone, formatPhone, guessCountry } from '../lib/phone.js';
 import { render } from '../lib/templates.js';
 import { lookupNumber, LookupError } from '../lib/lookup.js';
 import { imageLimiter } from '../middleware/rateLimit.js';
-import { renderHtmlToPng, getCachedImage, storeImage, CARD_WIDTH, CARD_HEIGHT } from '../lib/imageRenderer.js';
+import { renderHtmlToPng, getCachedImage, storeImage, cardFontsReady, CARD_WIDTH, CARD_HEIGHT } from '../lib/imageRenderer.js';
 import { config } from '../config.js';
 import { logger } from '../lib/logger.js';
 
@@ -39,11 +39,11 @@ export function createImageRouter({ cache }) {
     const { number } = parsed;
     const download = req.query.download === '1';
 
-    const send = (buffer, source) => {
+    const send = (buffer, source, { cacheable = true } = {}) => {
       res.set({
         'Content-Type': 'image/png',
         'Content-Length': buffer.length,
-        'Cache-Control': `public, max-age=${Math.min(config.cache.imageTtlSeconds, 3600)}`,
+        'Cache-Control': cacheable ? `public, max-age=${Math.min(config.cache.imageTtlSeconds, 3600)}` : 'no-store',
         'X-Image-Cache': source,
       });
       if (download) res.set('Content-Disposition', `attachment; filename="sim-info-${number}.png"`);
@@ -62,14 +62,17 @@ export function createImageRouter({ cache }) {
             const result = await lookupNumber(number, cache);
             const html = await buildCardHtml(number, result);
             const png = await renderHtmlToPng(html);
-            await storeImage(number, png);
-            logger.info('card_rendered', { number, ms: Date.now() - started, bytes: png.length });
-            return png;
+            // A card rendered while a font download had failed may lack emoji
+            // or Urdu/Hindi glyphs; serve it, but do not cache it anywhere.
+            const complete = cardFontsReady();
+            if (complete) await storeImage(number, png);
+            logger.info('card_rendered', { number, ms: Date.now() - started, bytes: png.length, fontsComplete: complete });
+            return { png, complete };
           })().finally(() => rendering.delete(number)),
         );
       }
-      const png = await rendering.get(number);
-      return send(png, 'miss');
+      const { png, complete } = await rendering.get(number);
+      return send(png, complete ? 'miss' : 'miss-degraded', { cacheable: complete });
     } catch (err) {
       if (err instanceof LookupError) {
         return res.status(err.status).type('text/plain').send(err.message);

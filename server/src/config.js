@@ -114,6 +114,8 @@ export const config = {
     ttlSeconds: int('CACHE_TTL_SECONDS', 7 * 24 * 60 * 60),
     redisUrl: env('REDIS_URL', ''),
     imageTtlSeconds: int('IMAGE_CACHE_TTL_SECONDS', 7 * 24 * 60 * 60),
+    // Upper bound on cached PNG files on disk (oldest evicted first); 0 disables the cap.
+    imageMaxFiles: int('IMAGE_CACHE_MAX_FILES', 200),
   },
   rateLimit: {
     windowMs: int('RATE_LIMIT_WINDOW_MS', 60_000),
@@ -131,6 +133,8 @@ export const config = {
       .split(',')
       .map((u) => u.trim())
       .filter(Boolean),
+    // How long to wait before retrying a failed font download.
+    fontRetryMs: int('CARD_FONT_RETRY_MS', 5 * 60 * 1000),
   },
   /** Absolute path of the analytics log file, or null when disabled / not writable here. */
   logFile: writableOrNull('LOG_FILE', env('LOG_FILE', '')),
