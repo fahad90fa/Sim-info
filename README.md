@@ -118,8 +118,9 @@ framework preset to *Other*, builds the React client to `client/dist` as static 
 and rewrites every other path (`/api/*`, `/print/*`, `/share/*`, `/image/*`) to one
 serverless function, `api/index.js`, which exports the Express app.
 
-**Option B – Root Directory = `server`.** Vercel auto-detects Express and uses
-`server/src/app.js` (its default export is the app). `server/vercel.json` installs and
+**Option B – Root Directory = `server`.** `server/vercel.json` pins the Express preset
+(Vercel would also auto-detect it), whose entrypoint is `server/src/app.js` (its default
+export is the app). `server/vercel.json` installs and
 builds from the repository root, and the function serves the SPA itself. Two project
 settings must keep their defaults: *Include source files outside of the Root
 Directory* enabled, and *Output Directory* blank (a non-empty value makes the Express
@@ -144,10 +145,12 @@ Either way:
    [`@sparticuz/chromium`](https://github.com/Sparticuz/chromium), a Chromium build
    for Lambda‑style runtimes, extracted to `/tmp` on the first render (a cold render
    takes roughly 4–6 s, later ones under a second). Generated PNGs are cached in `/tmp`
-   per instance. A colour emoji font is downloaded to `/tmp/fonts` on cold start; set
-   `CARD_EMOJI_FONT_URL` to an empty string to skip that.
+   per instance. Emoji, Arabic and Devanagari fonts are downloaded to `/tmp/fonts` on
+   cold start (the Lambda Chromium only ships Open Sans); set `CARD_FONT_URLS` to an
+   empty string to skip that.
 
-Notes for serverless: the function entrypoints export the Express app synchronously
+Notes for serverless: `NODE_ENV` defaults to `production` there, and the Node.js
+version comes from `engines` (22.x) in both layouts. The function entrypoints export the Express app synchronously
 (Vercel's launcher needs a function export or a `listen()` call at import time) and the
 cache backend connects on the first request. `TRUST_PROXY` defaults to `1`,
 `IMAGE_CACHE_DIR` and `LOG_FILE` are only honoured under `/tmp`, and `.env` files are
@@ -208,7 +211,7 @@ project's environment variables instead.
 | `IMAGE_RATE_LIMIT_MAX` | `20` | `/image`, `/print`, `/share` requests per window per IP |
 | `PUPPETEER_EXECUTABLE_PATH` | auto‑detect | Chrome/Chromium binary |
 | `IMAGE_RENDER_CONCURRENCY` | `2` | Max simultaneous headless renders |
-| `CARD_EMOJI_FONT_URL` | Noto Color Emoji from GitHub | Serverless only: emoji font downloaded to `/tmp/fonts`; empty disables |
+| `CARD_FONT_URLS` | Noto Color Emoji, Noto Sans Arabic, Noto Sans Devanagari (GitHub) | Serverless only: fonts downloaded to `/tmp/fonts` at cold start so emoji, Urdu and Hindi names render on cards; empty disables |
 | `LOG_FILE` | empty | Append lookup analytics as JSON lines to this file (on Vercel/Lambda only paths under `/tmp` are honoured) |
 
 ## HTTP API

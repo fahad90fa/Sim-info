@@ -42,42 +42,59 @@ function findPlaywrightChromium() {
   return null;
 }
 
+const SERVERLESS_TMP_ARTIFACTS = ['chromium', 'fonts', 'fonts-cache', 'al2023', 'swiftshader'];
+
+/** Remove everything @sparticuz/chromium extracted so the next launch starts clean. */
+async function cleanupServerlessChromium() {
+  await Promise.all(
+    SERVERLESS_TMP_ARTIFACTS.map((name) => fs.rm(path.join(os.tmpdir(), name), { recursive: true, force: true }).catch(() => {})),
+  );
+}
+
 /**
  * The Lambda Chromium build ships only Open Sans, and its fontconfig scans
- * /tmp/fonts at launch. Download a colour emoji font there (once per instance)
- * so names such as "Fahad ☠️" render on the card.
+ * /tmp/fonts at launch. Download extra fonts there (colour emoji, Arabic and
+ * Devanagari so Urdu / Hindi names render) once per instance.
  *
  * Must run AFTER chromium.executablePath(): that call extracts fonts.tar.br
  * (fonts.conf + Open Sans) into /tmp/fonts and skips extraction if the
  * directory already exists - creating it first would leave Chromium with no
  * fontconfig at all.
  */
-let emojiFontFailed = false;
-async function ensureServerlessEmojiFont() {
-  const url = config.puppeteer.emojiFontUrl;
-  if (!url || emojiFontFailed) return;
+const FONT_RETRY_AFTER_MS = 5 * 60 * 1000;
+let fontRetryAt = 0;
+async function ensureServerlessFonts() {
+  const urls = config.puppeteer.fontUrls;
+  if (!urls.length || Date.now() < fontRetryAt) return;
+  const dir = path.join(os.tmpdir(), 'fonts');
+  await fs.mkdir(dir, { recursive: true });
+  const results = await Promise.all(urls.map((url) => downloadFont(url, dir)));
+  if (results.some((ok) => !ok)) fontRetryAt = Date.now() + FONT_RETRY_AFTER_MS; // back off, then try again
+}
+
+async function downloadFont(url, dir) {
   let file;
   try {
-    const name = path.basename(new URL(url).pathname) || 'emoji.ttf';
-    file = path.join(os.tmpdir(), 'fonts', name);
+    const name = path.basename(new URL(url).pathname) || 'font.ttf';
+    file = path.join(dir, name);
   } catch {
-    logger.warn('serverless_emoji_font_invalid_url', { url });
-    return;
+    logger.warn('serverless_font_invalid_url', { url });
+    return true; // nothing to retry
   }
-  if (fsSync.existsSync(file)) return;
+  if (fsSync.existsSync(file)) return true;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 15_000);
   try {
     const res = await fetch(url, { signal: controller.signal });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const buffer = Buffer.from(await res.arrayBuffer());
-    await fs.mkdir(path.dirname(file), { recursive: true });
     await fs.writeFile(`${file}.tmp`, buffer);
     await fs.rename(`${file}.tmp`, file);
-    logger.info('serverless_emoji_font_ready', { file, bytes: buffer.length });
+    logger.info('serverless_font_ready', { file, bytes: buffer.length });
+    return true;
   } catch (err) {
-    emojiFontFailed = true; // do not pay the download/timeout again on this instance
-    logger.warn('serverless_emoji_font_failed', { message: err.message });
+    logger.warn('serverless_font_failed', { url, message: err.message });
+    return false;
   } finally {
     clearTimeout(timer);
   }
@@ -91,8 +108,15 @@ async function resolveServerlessChromium() {
   if (!config.isServerless) return null;
   try {
     const { default: chromium } = await import('@sparticuz/chromium');
-    const executablePath = await chromium.executablePath();
-    await ensureServerlessEmojiFont();
+    let executablePath = await chromium.executablePath();
+    // A /tmp/fonts left behind without fonts.conf (e.g. by an interrupted first
+    // start) would make Chromium launch without any font; re-extract everything.
+    if (!fsSync.existsSync(path.join(os.tmpdir(), 'fonts', 'fonts.conf'))) {
+      logger.warn('serverless_chromium_reextract', { reason: 'fonts.conf missing' });
+      await cleanupServerlessChromium();
+      executablePath = await chromium.executablePath();
+    }
+    await ensureServerlessFonts();
     return { executablePath, args: chromium.args };
   } catch (err) {
     logger.warn('serverless_chromium_unavailable', { message: err.message });
@@ -133,19 +157,30 @@ async function getBrowser() {
       );
     }
     const { default: puppeteer } = await import('puppeteer-core');
-    const browser = await puppeteer.launch({
-      executablePath,
-      headless: true,
-      args: [
-        ...(serverless?.args ?? []),
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--font-render-hinting=none',
-        '--hide-scrollbars',
-      ],
-    });
+    let browser;
+    try {
+      browser = await puppeteer.launch({
+        executablePath,
+        headless: true,
+        args: [
+          ...(serverless?.args ?? []),
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-gpu',
+          '--font-render-hinting=none',
+          '--hide-scrollbars',
+        ],
+      });
+    } catch (err) {
+      if (serverless) {
+        // A truncated extraction (e.g. the first render was killed mid-way)
+        // would otherwise be reused forever; start from scratch next time.
+        logger.warn('serverless_chromium_launch_failed_cleaning_tmp', { message: err.message });
+        await cleanupServerlessChromium();
+      }
+      throw err;
+    }
     browser.on('disconnected', () => {
       logger.warn('browser_disconnected');
       browserPromise = null;
@@ -174,8 +209,23 @@ const release = () => {
   else active -= 1;
 };
 
+const isDeadBrowserError = (err) =>
+  /Target closed|Protocol error|Connection closed|browser has disconnected|Session closed/i.test(err?.message ?? '');
+
 /** Render an HTML string to a PNG buffer at the card size. */
-export async function renderHtmlToPng(html, { timeoutMs = 20_000 } = {}) {
+export async function renderHtmlToPng(html, options = {}) {
+  try {
+    return await renderOnce(html, options);
+  } catch (err) {
+    if (!isDeadBrowserError(err)) throw err;
+    // The shared browser crashed while we were using it; relaunch and retry once.
+    logger.warn('card_render_retry_after_browser_crash', { message: err.message });
+    browserPromise = null;
+    return renderOnce(html, options);
+  }
+}
+
+async function renderOnce(html, { timeoutMs = 20_000 } = {}) {
   await acquire();
   let page;
   try {

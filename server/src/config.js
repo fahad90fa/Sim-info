@@ -51,16 +51,22 @@ const bool = (key, fallback = false) => {
 const warn = (event, fields) =>
   process.stderr.write(`${JSON.stringify({ time: new Date().toISOString(), level: 'warn', event, ...fields })}\n`);
 
+const DEFAULT_CARD_FONT_URLS = [
+  'https://raw.githubusercontent.com/googlefonts/noto-emoji/main/fonts/NotoColorEmoji.ttf',
+  'https://raw.githubusercontent.com/notofonts/notofonts.github.io/main/fonts/NotoSansArabic/hinted/ttf/NotoSansArabic-Regular.ttf',
+  'https://raw.githubusercontent.com/notofonts/notofonts.github.io/main/fonts/NotoSansDevanagari/hinted/ttf/NotoSansDevanagari-Regular.ttf',
+].join(',');
+
 const trustProxyRaw = env('TRUST_PROXY', isServerless ? '1' : '0');
 let trustProxy;
 if (['true', 'false'].includes(trustProxyRaw)) trustProxy = trustProxyRaw === 'true';
 else if (/^\d+$/.test(trustProxyRaw)) trustProxy = Number.parseInt(trustProxyRaw, 10);
 else trustProxy = trustProxyRaw; // e.g. "loopback, 10.0.0.0/8"
 
-/** True when `target` is inside `dir` (no `..` escape, separator-aware). */
+/** True when `target` is `dir` itself or inside it (no `..` escape, separator-aware). */
 const isInside = (dir, target) => {
   const rel = path.relative(dir, target);
-  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
 };
 
 /** Serverless platforms can only write under the OS temp dir. */
@@ -68,7 +74,7 @@ const writableOrNull = (setting, configured) => {
   if (!configured) return null;
   const resolved = path.resolve(serverRoot, configured);
   if (!isServerless || isInside(os.tmpdir(), resolved)) return resolved;
-  warn('config_path_ignored_on_serverless', { setting, configured, hint: `use a path under ${os.tmpdir()}` });
+  warn('config_path_ignored_on_serverless', { setting, configured, hint: `only ${os.tmpdir()} is writable here` });
   return null;
 };
 
@@ -90,8 +96,9 @@ export const config = {
   },
   isServerless,
   port: int('PORT', 3000),
-  nodeEnv: env('NODE_ENV', 'development'),
-  isProduction: env('NODE_ENV', 'development') === 'production',
+  // Serverless deployments are production unless told otherwise.
+  nodeEnv: env('NODE_ENV', isServerless ? 'production' : 'development'),
+  isProduction: env('NODE_ENV', isServerless ? 'production' : 'development') === 'production',
   trustProxy,
   publicBaseUrl: env('PUBLIC_BASE_URL', '').replace(/\/+$/, ''),
   corsOrigins: env('CORS_ORIGIN', '')
@@ -116,11 +123,14 @@ export const config = {
   puppeteer: {
     executablePath: env('PUPPETEER_EXECUTABLE_PATH', ''),
     concurrency: Math.max(1, int('IMAGE_RENDER_CONCURRENCY', 2)),
-    // Only used with the serverless Chromium build. Set to an empty string to skip.
-    emojiFontUrl:
-      process.env.CARD_EMOJI_FONT_URL === undefined
-        ? 'https://raw.githubusercontent.com/googlefonts/noto-emoji/main/fonts/NotoColorEmoji.ttf'
-        : process.env.CARD_EMOJI_FONT_URL,
+    // Extra fonts downloaded into /tmp/fonts for the serverless Chromium build,
+    // which ships only Open Sans: colour emoji plus Arabic (Urdu) and
+    // Devanagari (Hindi) coverage for names. Comma-separated URLs; set
+    // CARD_FONT_URLS to an empty string to skip the downloads.
+    fontUrls: (process.env.CARD_FONT_URLS === undefined ? DEFAULT_CARD_FONT_URLS : process.env.CARD_FONT_URLS)
+      .split(',')
+      .map((u) => u.trim())
+      .filter(Boolean),
   },
   /** Absolute path of the analytics log file, or null when disabled / not writable here. */
   logFile: writableOrNull('LOG_FILE', env('LOG_FILE', '')),
