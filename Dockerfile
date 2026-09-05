@@ -29,7 +29,8 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 COPY server/package.json server/
 COPY client/package.json client/
-RUN npm ci --omit=dev --workspace=server && npm cache clean --force
+# --omit=optional skips @sparticuz/chromium (only used on Vercel/Lambda); this image uses Debian's Chromium.
+RUN npm ci --omit=dev --omit=optional --workspace=server && npm cache clean --force
 COPY server server
 COPY --from=build /app/client/dist client/dist
 RUN mkdir -p /app/server/cache/images && chown -R node:node /app

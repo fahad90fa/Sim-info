@@ -3,7 +3,7 @@ import helmet from 'helmet';
 import cors from 'cors';
 import fs from 'node:fs';
 import path from 'node:path';
-import { config } from './config.js';
+import { config as settings } from './config.js';
 import { createApiRouter } from './routes/api.js';
 import { createPagesRouter } from './routes/pages.js';
 import { createImageRouter } from './routes/image.js';
@@ -17,7 +17,7 @@ import { logger } from './lib/logger.js';
 export function createApp({ cache }) {
   const app = express();
   app.disable('x-powered-by');
-  app.set('trust proxy', config.trustProxy);
+  app.set('trust proxy', settings.trustProxy);
   app.use(pageResponder);
 
   app.use(
@@ -40,8 +40,8 @@ export function createApp({ cache }) {
     }),
   );
 
-  if (config.corsOrigins.length) {
-    app.use('/api', cors({ origin: config.corsOrigins, methods: ['GET'] }));
+  if (settings.corsOrigins.length) {
+    app.use('/api', cors({ origin: settings.corsOrigins, methods: ['GET'] }));
   }
 
   app.use('/api', createApiRouter({ cache }));
@@ -51,16 +51,18 @@ export function createApp({ cache }) {
   // Assets for the server-rendered pages, served from memory (see lib/templates.js).
   for (const [name, asset] of Object.entries(assets)) {
     app.get(`/${name}`, (_req, res) => {
-      res.set('Cache-Control', config.isProduction ? 'public, max-age=86400' : 'no-cache');
+      res.set('Cache-Control', settings.isProduction ? 'public, max-age=86400' : 'no-cache');
       res.type(asset.type).send(asset.body);
     });
   }
 
   // Built React client (client/dist) when present; SPA fallback to index.html.
-  const indexHtml = path.join(config.paths.clientDist, 'index.html');
+  const indexHtml = path.join(settings.paths.clientDist, 'index.html');
   if (fs.existsSync(indexHtml)) {
-    app.use(express.static(config.paths.clientDist, { maxAge: config.isProduction ? '1y' : 0, index: false }));
-    app.get(/^\/(?!api\/|print\/|share\/|image\/).*/, (_req, res) => {
+    app.use(express.static(settings.paths.clientDist, { maxAge: settings.isProduction ? '1y' : 0, index: false }));
+    // SPA fallback for client-side routes; paths that look like files (stale
+    // hashed assets, favicons) fall through to the 404 handler instead.
+    app.get(/^\/(?!api\/|print\/|share\/|image\/)(?!.*\.[a-z0-9]+$).*/i, (_req, res) => {
       res.set('Cache-Control', 'no-cache');
       res.sendFile(indexHtml, { dotfiles: 'allow' });
     });
@@ -94,3 +96,10 @@ export function createApp({ cache }) {
  */
 export const app = createApp({ cache: createLazyCache() });
 export default app;
+
+/**
+ * Vercel function settings, read statically at build time when this file is
+ * the entrypoint (Root Directory = server). A cold image render (Chromium
+ * extraction + launch + screenshot) needs well over the legacy 10 s default.
+ */
+export const config = { maxDuration: 60 };

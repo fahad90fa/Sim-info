@@ -42,7 +42,7 @@ More screenshots (mobile layout, print page) are in [`docs/screenshots`](docs/sc
 
 | Layer | Choice |
 | --- | --- |
-| Backend | Node.js 20+, Express 5, EJS templates |
+| Backend | Node.js 22, Express 5, EJS templates |
 | Frontend | React 19, Vite 7, Tailwind CSS 4 |
 | Cache | Redis (ioredis) or in‑memory `node-cache` |
 | Images | Puppeteer (`puppeteer-core`) + system Chromium |
@@ -78,7 +78,7 @@ More screenshots (mobile layout, print page) are in [`docs/screenshots`](docs/sc
 
 ## Quick start (local)
 
-Requirements: Node.js 20+ and a Chrome/Chromium binary for image generation
+Requirements: Node.js 22 and a Chrome/Chromium binary for image generation
 (auto‑detected on Linux/macOS/Windows in the usual locations; otherwise set
 `PUPPETEER_EXECUTABLE_PATH`).
 
@@ -119,17 +119,20 @@ and rewrites every other path (`/api/*`, `/print/*`, `/share/*`, `/image/*`) to 
 serverless function, `api/index.js`, which exports the Express app.
 
 **Option B – Root Directory = `server`.** Vercel auto-detects Express and uses
-`server/src/app.js` (its default export is the app). `server/vercel.json` builds the
-client from the sibling folder, and the function serves the SPA itself. This requires
-the project setting *Include source files outside of the Root Directory* to stay
-enabled (the default).
+`server/src/app.js` (its default export is the app). `server/vercel.json` installs and
+builds from the repository root, and the function serves the SPA itself. Two project
+settings must keep their defaults: *Include source files outside of the Root
+Directory* enabled, and *Output Directory* blank (a non-empty value makes the Express
+preset look for its entrypoint there).
 
 Either way:
 
 1. Import the GitHub repo in Vercel and keep the settings above. Do **not** pick a
    different framework preset by hand.
 2. Add environment variables under Project → Settings → Environment Variables. The
-   committed `.env` file is **not** read at runtime on Vercel. Recommended:
+   committed `.env` file is for local and Docker runs only: the server skips it on
+   Vercel/Lambda (and never bundles it), so anything you need there must be set in
+   the dashboard. Recommended:
 
    | Variable | Value |
    | --- | --- |
@@ -146,9 +149,13 @@ Either way:
 
 Notes for serverless: the function entrypoints export the Express app synchronously
 (Vercel's launcher needs a function export or a `listen()` call at import time) and the
-cache backend connects on the first request. `TRUST_PROXY` defaults to `1` and
-`IMAGE_CACHE_DIR` falls back to `/tmp` automatically when `VERCEL` or an AWS Lambda
-variable is present. Rate limits are per function instance. `maxDuration` is 60 s.
+cache backend connects on the first request. `TRUST_PROXY` defaults to `1`,
+`IMAGE_CACHE_DIR` and `LOG_FILE` are only honoured under `/tmp`, and `.env` files are
+skipped whenever `VERCEL` or an AWS Lambda variable is present. Rate limits are per
+function instance. Both layouts set `maxDuration` to 60 s; a cold image render
+(Chromium extraction, browser launch, emoji-font download) takes roughly 5 s. The
+install commands pass `--include=dev` so a `NODE_ENV=production` build variable
+cannot skip the client's build tooling.
 
 If a deployment shows `FUNCTION_INVOCATION_FAILED`, open the deployment's *Functions*
 log in the Vercel dashboard: the first log line names the thrown error.
@@ -185,7 +192,7 @@ project's environment variables instead.
 | Variable | Default | Description |
 | --- | --- | --- |
 | `PORT` | `3000` | HTTP port |
-| `NODE_ENV` | `development` | `production` enables view caching and long static cache headers |
+| `NODE_ENV` | `development` | `production` precompiles templates once and sends long cache headers for static assets; in development templates and `print.css` are re-read on every request |
 | `TRUST_PROXY` | `0` (`1` on Vercel/Lambda) | Express `trust proxy` setting (`1`, `true`, or a list like `loopback, 10.0.0.0/8`) |
 | `PUBLIC_BASE_URL` | request origin | Absolute origin used in Open Graph tags |
 | `CORS_ORIGIN` | empty | Comma‑separated origins allowed to call `/api` cross‑origin |
@@ -202,7 +209,7 @@ project's environment variables instead.
 | `PUPPETEER_EXECUTABLE_PATH` | auto‑detect | Chrome/Chromium binary |
 | `IMAGE_RENDER_CONCURRENCY` | `2` | Max simultaneous headless renders |
 | `CARD_EMOJI_FONT_URL` | Noto Color Emoji from GitHub | Serverless only: emoji font downloaded to `/tmp/fonts`; empty disables |
-| `LOG_FILE` | empty | Append lookup analytics as JSON lines to this file |
+| `LOG_FILE` | empty | Append lookup analytics as JSON lines to this file (on Vercel/Lambda only paths under `/tmp` are honoured) |
 
 ## HTTP API
 
@@ -250,7 +257,7 @@ to the app with the number pre‑filled (`/?number=…`).
 
 ### `GET /api/health`
 
-`{ "status": "ok", "cache": "memory" | "redis", "time": "…" }`
+`{ "status": "ok", "cache": "memory" | "redis" | "pending", "time": "…" }` (`pending` until the first lookup on a serverless instance, whose cache connects lazily)
 
 ## Notes
 

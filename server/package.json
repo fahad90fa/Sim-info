@@ -11,7 +11,6 @@
     "lint": "node --check src/index.js"
   },
   "dependencies": {
-    "@sparticuz/chromium": "^149.0.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "ejs": "^3.1.10",
@@ -21,5 +20,8 @@
     "ioredis": "^5.4.1",
     "node-cache": "^5.1.2",
     "puppeteer-core": "^25.0.0"
+  },
+  "optionalDependencies": {
+    "@sparticuz/chromium": "^149.0.0"
   }
 }

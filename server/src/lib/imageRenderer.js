@@ -46,10 +46,16 @@ function findPlaywrightChromium() {
  * The Lambda Chromium build ships only Open Sans, and its fontconfig scans
  * /tmp/fonts at launch. Download a colour emoji font there (once per instance)
  * so names such as "Fahad ☠️" render on the card.
+ *
+ * Must run AFTER chromium.executablePath(): that call extracts fonts.tar.br
+ * (fonts.conf + Open Sans) into /tmp/fonts and skips extraction if the
+ * directory already exists - creating it first would leave Chromium with no
+ * fontconfig at all.
  */
+let emojiFontFailed = false;
 async function ensureServerlessEmojiFont() {
   const url = config.puppeteer.emojiFontUrl;
-  if (!url) return;
+  if (!url || emojiFontFailed) return;
   let file;
   try {
     const name = path.basename(new URL(url).pathname) || 'emoji.ttf';
@@ -70,6 +76,7 @@ async function ensureServerlessEmojiFont() {
     await fs.rename(`${file}.tmp`, file);
     logger.info('serverless_emoji_font_ready', { file, bytes: buffer.length });
   } catch (err) {
+    emojiFontFailed = true; // do not pay the download/timeout again on this instance
     logger.warn('serverless_emoji_font_failed', { message: err.message });
   } finally {
     clearTimeout(timer);
@@ -84,8 +91,9 @@ async function resolveServerlessChromium() {
   if (!config.isServerless) return null;
   try {
     const { default: chromium } = await import('@sparticuz/chromium');
+    const executablePath = await chromium.executablePath();
     await ensureServerlessEmojiFont();
-    return { executablePath: await chromium.executablePath(), args: chromium.args };
+    return { executablePath, args: chromium.args };
   } catch (err) {
     logger.warn('serverless_chromium_unavailable', { message: err.message });
     return null;

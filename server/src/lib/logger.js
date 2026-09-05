@@ -4,9 +4,17 @@ import { config } from '../config.js';
 
 let fileStream = null;
 if (config.logFile) {
-  const target = path.resolve(config.paths.serverRoot, config.logFile);
-  fs.mkdirSync(path.dirname(target), { recursive: true });
-  fileStream = fs.createWriteStream(target, { flags: 'a' });
+  try {
+    fs.mkdirSync(path.dirname(config.logFile), { recursive: true });
+    fileStream = fs.createWriteStream(config.logFile, { flags: 'a' });
+    fileStream.on('error', (err) => {
+      process.stderr.write(`${JSON.stringify({ level: 'warn', event: 'log_file_error', message: err.message })}\n`);
+      fileStream = null;
+    });
+  } catch (err) {
+    process.stderr.write(`${JSON.stringify({ level: 'warn', event: 'log_file_unavailable', file: config.logFile, message: err.message })}\n`);
+    fileStream = null;
+  }
 }
 
 function write(level, event, fields = {}) {

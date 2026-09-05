@@ -86,18 +86,25 @@ export async function createCache(options = {}) {
  */
 export function createLazyCache(options = {}) {
   let ready = null;
+  let current = null;
   const backend = () => {
     if (!ready) {
-      ready = createCache(options).catch((err) => {
-        ready = null; // retry on the next call
-        throw err;
-      });
+      ready = createCache(options)
+        .then((cache) => {
+          current = cache;
+          return cache;
+        })
+        .catch((err) => {
+          ready = null; // retry on the next call
+          throw err;
+        });
     }
     return ready;
   };
   return {
+    /** 'pending' until the first use, then the backend's kind ('memory' | 'redis'). */
     get kind() {
-      return 'lazy';
+      return current ? current.kind : 'pending';
     },
     async get(key) {
       return (await backend()).get(key);
@@ -112,6 +119,7 @@ export function createLazyCache(options = {}) {
       if (!ready) return;
       const cache = await ready.catch(() => null);
       ready = null;
+      current = null;
       if (cache) await cache.close();
     },
   };

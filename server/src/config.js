@@ -7,9 +7,33 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const serverRoot = path.resolve(__dirname, '..');
 const repoRoot = path.resolve(serverRoot, '..');
 
-// Load .env from the repo root first, then allow a server-local override.
-dotenv.config({ path: path.join(repoRoot, '.env') });
-dotenv.config({ path: path.join(serverRoot, '.env'), override: true });
+/**
+ * Vercel / AWS Lambda: read-only filesystem except /tmp, always behind a
+ * proxy, and no long-lived process (so in-memory caches live per instance).
+ * Only genuine Lambda-style runtimes count; ECS/Fargate containers (which set
+ * AWS_EXECUTION_ENV=AWS_ECS_*) run the Docker image normally.
+ */
+const isServerless = Boolean(
+  process.env.VERCEL ||
+    process.env.AWS_LAMBDA_FUNCTION_NAME ||
+    /^AWS_Lambda_/.test(process.env.AWS_EXECUTION_ENV ?? ''),
+);
+
+/**
+ * Paths to files that only matter for local / Docker runs. Built through a
+ * helper on purpose: serverless bundlers (@vercel/nft) statically evaluate
+ * `path.join(<root>, 'literal')` and would otherwise copy `.env` and the local
+ * render cache into the function bundle.
+ */
+const localFile = (...parts) => path.join(repoRoot, ...parts);
+const localServerFile = (...parts) => path.join(serverRoot, ...parts);
+
+// .env files configure local and Docker runs. On serverless platforms the
+// provider's environment variables are the only source of configuration.
+if (!isServerless) {
+  dotenv.config({ path: localFile('.env') });
+  dotenv.config({ path: localServerFile('.env'), override: true });
+}
 
 const env = (key, fallback = '') => {
   const value = process.env[key];
@@ -24,10 +48,8 @@ const bool = (key, fallback = false) => {
   if (value === '') return fallback;
   return ['1', 'true', 'yes', 'on'].includes(value);
 };
-
-// Vercel / AWS Lambda: read-only filesystem except /tmp, always behind a proxy,
-// and no long-lived process (so the in-memory caches only live per instance).
-const isServerless = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.AWS_EXECUTION_ENV);
+const warn = (event, fields) =>
+  process.stderr.write(`${JSON.stringify({ time: new Date().toISOString(), level: 'warn', event, ...fields })}\n`);
 
 const trustProxyRaw = env('TRUST_PROXY', isServerless ? '1' : '0');
 let trustProxy;
@@ -35,22 +57,34 @@ if (['true', 'false'].includes(trustProxyRaw)) trustProxy = trustProxyRaw === 't
 else if (/^\d+$/.test(trustProxyRaw)) trustProxy = Number.parseInt(trustProxyRaw, 10);
 else trustProxy = trustProxyRaw; // e.g. "loopback, 10.0.0.0/8"
 
+/** True when `target` is inside `dir` (no `..` escape, separator-aware). */
+const isInside = (dir, target) => {
+  const rel = path.relative(dir, target);
+  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+};
+
+/** Serverless platforms can only write under the OS temp dir. */
+const writableOrNull = (setting, configured) => {
+  if (!configured) return null;
+  const resolved = path.resolve(serverRoot, configured);
+  if (!isServerless || isInside(os.tmpdir(), resolved)) return resolved;
+  warn('config_path_ignored_on_serverless', { setting, configured, hint: `use a path under ${os.tmpdir()}` });
+  return null;
+};
+
 function resolveImageCacheDir() {
-  const configured = env('IMAGE_CACHE_DIR', '');
-  if (configured) {
-    const resolved = path.resolve(serverRoot, configured);
-    // On serverless platforms only /tmp is writable; ignore a non-tmp path.
-    if (!isServerless || resolved.startsWith(os.tmpdir())) return resolved;
-  }
-  return isServerless ? path.join(os.tmpdir(), 'sim-info-images') : path.join(serverRoot, 'cache', 'images');
+  const configured = writableOrNull('IMAGE_CACHE_DIR', env('IMAGE_CACHE_DIR', ''));
+  if (configured) return configured;
+  return isServerless ? path.join(os.tmpdir(), 'sim-info-images') : localServerFile('cache', 'images');
 }
 
 export const config = {
   paths: {
     serverRoot,
     repoRoot,
-    templates: path.join(serverRoot, 'templates'),
-    public: path.join(serverRoot, 'public'),
+    // Deliberately a static literal path: this is what makes @vercel/nft bundle
+    // the built SPA into the serverless function (needed when the Express app
+    // serves the client itself, e.g. Vercel with Root Directory = server).
     clientDist: path.join(repoRoot, 'client', 'dist'),
     imageCacheDir: resolveImageCacheDir(),
   },
@@ -88,7 +122,12 @@ export const config = {
         ? 'https://raw.githubusercontent.com/googlefonts/noto-emoji/main/fonts/NotoColorEmoji.ttf'
         : process.env.CARD_EMOJI_FONT_URL,
   },
-  logFile: env('LOG_FILE', ''),
+  /** Absolute path of the analytics log file, or null when disabled / not writable here. */
+  logFile: writableOrNull('LOG_FILE', env('LOG_FILE', '')),
 };
+
+if (isServerless && (trustProxy === 0 || trustProxy === false)) {
+  warn('trust_proxy_disabled_on_serverless', { hint: 'every request arrives via a proxy; rate limiting will see one shared IP' });
+}
 
 export default config;
