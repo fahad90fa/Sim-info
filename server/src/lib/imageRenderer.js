@@ -311,6 +311,8 @@ async function resolveServerlessChromium() {
 let browserPromise = null; // launch (pending or settled) of the tracked browser
 let currentBrowser = null; // the tracked browser once its launch resolved
 let swapInProgress = false; // a font-swap launch is pending while the old browser keeps serving
+let swapRetryAt = 0; // do not retry a failed swap launch before this time
+const SWAP_BACKOFF_MS = 30_000;
 const inFlight = new Map(); // browser -> renders currently using it
 const retired = new Set(); // browsers replaced while still serving renders
 const browserFonts = new WeakMap(); // browser -> Set of font files present when it started
@@ -349,46 +351,57 @@ function retireBrowser(browser) {
  * browser keeps serving until the new one is up, and is kept if the launch
  * fails.
  */
-function launchBrowser({ replacing = null } = {}) {
+function launchBrowser({ replacing = null, replacingPromise = null } = {}) {
   const launch = (async () => {
-    const serverless = config.puppeteer.executablePath ? null : await resolveServerlessChromium();
-    const executablePath = serverless?.executablePath ?? (await resolveExecutablePath());
-    if (!executablePath) {
-      throw new Error('No Chrome/Chromium binary found. Set PUPPETEER_EXECUTABLE_PATH or install Chromium.');
-    }
-    const { default: puppeteer } = await import('puppeteer-core');
-    // Fontconfig scans /tmp/fonts once at startup: record what is on disk
-    // right now. A file landing after this point makes the browser stale and
-    // the next render swaps it (a rare unnecessary swap is the safe error).
-    const fontsSeen = presentFontFiles();
     let browser;
+    let executablePath;
     try {
-      browser = await puppeteer.launch({
-        executablePath,
-        headless: true,
-        args: [
-          ...(serverless?.args ?? []),
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-dev-shm-usage',
-          '--disable-gpu',
-          '--font-render-hinting=none',
-          '--hide-scrollbars',
-        ],
-      });
-    } catch (err) {
-      stats.launchFailures += 1;
-      if (serverless) {
-        // A truncated extraction (e.g. the first render was killed mid-way)
-        // would otherwise be reused forever; start from scratch next time.
-        // The fonts directory is kept: its integrity is checked separately.
-        logger.warn('serverless_chromium_launch_failed_cleaning_tmp', { message: err.message });
-        await cleanupServerlessChromium({ keepFonts: true });
+      const serverless = config.puppeteer.executablePath ? null : await resolveServerlessChromium();
+      executablePath = serverless?.executablePath ?? (await resolveExecutablePath());
+      if (!executablePath) {
+        throw new Error('No Chrome/Chromium binary found. Set PUPPETEER_EXECUTABLE_PATH or install Chromium.');
       }
+      const { default: puppeteer } = await import('puppeteer-core');
+      // Fontconfig scans /tmp/fonts once at startup: record what is on disk
+      // right now. A file landing after this point makes the browser stale and
+      // the next render swaps it (a rare unnecessary swap is the safe error).
+      const fontsSeen = presentFontFiles();
+      try {
+        browser = await puppeteer.launch({
+          executablePath,
+          headless: true,
+          args: [
+            ...(serverless?.args ?? []),
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-gpu',
+            '--font-render-hinting=none',
+            '--hide-scrollbars',
+          ],
+        });
+      } catch (err) {
+        stats.launchFailures += 1;
+        const oldStillServing = Boolean(replacing && currentBrowser === replacing && replacing.connected);
+        if (serverless && !oldStillServing) {
+          // A truncated extraction (e.g. the first render was killed mid-way)
+          // would otherwise be reused forever; start from scratch next time.
+          // The fonts directory is kept: its integrity is checked separately.
+          // (Skipped while the old browser still runs from this extraction.)
+          logger.warn('serverless_chromium_launch_failed_cleaning_tmp', { message: err.message });
+          await cleanupServerlessChromium({ keepFonts: true });
+        }
+        throw err;
+      }
+      browserFonts.set(browser, fontsSeen);
+    } catch (err) {
       if (replacing && browserPromise === launch && currentBrowser === replacing && replacing.connected) {
-        // The swap failed: keep serving with the old browser and try again later.
+        // The swap failed at any stage: keep serving with the old browser
+        // under its ORIGINAL tracked promise (so its own disconnect handler
+        // still recognises it) and try again after a back-off.
         logger.warn('browser_swap_failed_keeping_old', { message: err.message });
-        browserPromise = Promise.resolve(replacing);
+        browserPromise = replacingPromise;
+        swapRetryAt = Date.now() + SWAP_BACKOFF_MS;
         throw new LaunchCancelledError('Browser swap failed; the previous browser stays in use');
       }
       throw err;
@@ -400,7 +413,6 @@ function launchBrowser({ replacing = null } = {}) {
     }
     const previous = currentBrowser;
     currentBrowser = browser;
-    browserFonts.set(browser, fontsSeen);
     stats.launches += 1;
     if (previous && previous !== browser) {
       retireBrowser(previous);
@@ -462,7 +474,10 @@ export async function getBrowser() {
       throw err;
     }
     if (browser.connected) return browser;
-    dropBrowser(browser); // died between launch and use; the loop relaunches once
+    // Died between launch and use: make sure nobody awaits this launch again,
+    // whatever the tracking state, then relaunch on the next iteration.
+    if (browserPromise === awaited) browserPromise = null;
+    dropBrowser(browser);
   }
   throw new BrowserUnavailableError();
 }
@@ -474,9 +489,10 @@ export async function getBrowser() {
  */
 function replaceStaleBrowser() {
   const old = currentBrowser;
-  if (!old || swapInProgress || !isStale(old)) return false;
+  if (!old || swapInProgress || Date.now() < swapRetryAt || !isStale(old)) return false;
   logger.info('browser_swap_started', { reason: 'fonts arrived' });
-  browserPromise = launchBrowser({ replacing: old });
+  const oldPromise = browserPromise;
+  browserPromise = launchBrowser({ replacing: old, replacingPromise: oldPromise });
   return true;
 }
 
@@ -541,16 +557,27 @@ export async function renderHtmlToPng(html, options = {}) {
   return (await renderCard(html, options)).png;
 }
 
-/** Wait (bounded) for every <img> in the page to finish loading or failing. */
-const WAIT_FOR_IMAGES = (timeoutMs) =>
-  Promise.race([
-    Promise.all(
-      Array.from(document.images).map((img) =>
-        img.complete ? null : new Promise((resolve) => img.addEventListener('load', resolve, { once: true }) || img.addEventListener('error', resolve, { once: true })),
-      ),
-    ),
-    new Promise((resolve) => setTimeout(resolve, timeoutMs)),
-  ]).then(() => document.fonts?.ready);
+/**
+ * Wait (bounded) for every <img> in the page to finish loading or failing.
+ * Images still pending at the deadline are failed explicitly so the card's
+ * onerror fallback (the initial-letter avatar) renders instead of a blank.
+ */
+const WAIT_FOR_IMAGES = (timeoutMs) => {
+  const pending = Array.from(document.images).filter((img) => !img.complete);
+  const settled = Promise.all(
+    pending.map((img) => new Promise((resolve) => {
+      img.addEventListener('load', resolve, { once: true });
+      img.addEventListener('error', resolve, { once: true });
+    })),
+  );
+  const timeout = new Promise((resolve) =>
+    setTimeout(() => {
+      for (const img of pending) if (!img.complete) img.dispatchEvent(new Event('error'));
+      resolve();
+    }, timeoutMs),
+  );
+  return Promise.race([settled, timeout]).then(() => document.fonts?.ready);
+};
 
 async function renderOnce(html, { timeoutMs = 20_000 } = {}) {
   await acquire();
@@ -566,12 +593,13 @@ async function renderOnce(html, { timeoutMs = 20_000 } = {}) {
     page = await browser.newPage();
     await page.setViewport({ width: CARD_WIDTH, height: CARD_HEIGHT, deviceScaleFactor: 1 });
     // Wait for the document, then explicitly for images (remote thumbnails)
-    // and fonts. This is much cheaper than networkidle0, which idles for a
-    // fixed window after the last request.
+    // and fonts, all within one deadline. This is much cheaper than
+    // networkidle0, which idles for a fixed window after the last request.
+    const deadline = Date.now() + timeoutMs;
     await page.setContent(html, { waitUntil: 'load', timeout: timeoutMs }).catch((err) => {
       logger.warn('card_setcontent_timeout', { message: err.message });
     });
-    await page.evaluate(WAIT_FOR_IMAGES, timeoutMs).catch(() => {});
+    await page.evaluate(WAIT_FOR_IMAGES, Math.max(0, deadline - Date.now())).catch(() => {});
     const png = await page.screenshot({
       type: 'png',
       clip: { x: 0, y: 0, width: CARD_WIDTH, height: CARD_HEIGHT },
