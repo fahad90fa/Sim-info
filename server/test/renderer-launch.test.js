@@ -75,6 +75,29 @@ test('closeBrowser() during a launch leaves no untracked browser behind', { skip
   assert.equal(renderer.stats.launches, before + 1);
 });
 
+test('stale temp files are swept even when the cap is disabled', async () => {
+  const dir = path.join(scratch, 'nocap');
+  fs.mkdirSync(dir, { recursive: true });
+  const stale = path.join(dir, '1111.png.42.tmp');
+  fs.writeFileSync(stale, 'x');
+  const old = new Date(Date.now() - 10 * 60 * 1000);
+  fs.utimesSync(stale, old, old);
+  const { config } = await import('../src/config.js');
+  const saved = { dir: config.paths.imageCacheDir, max: config.cache.imageMaxFiles };
+  config.paths.imageCacheDir = dir;
+  config.cache.imageMaxFiles = 0;
+  try {
+    for (let i = 0; i < 4; i += 1) await renderer.storeImage(`0300000010${i}`, Buffer.from(`png-${i}`));
+    await renderer.pruneDiskCache();
+    const names = fs.readdirSync(dir);
+    assert.equal(names.filter((n) => n.endsWith('.png')).length, 4, 'no cap: nothing evicted');
+    assert.ok(!names.includes('1111.png.42.tmp'), 'stale temp file swept');
+  } finally {
+    config.paths.imageCacheDir = saved.dir;
+    config.cache.imageMaxFiles = saved.max;
+  }
+});
+
 test('the disk cache honours its file cap and sweeps stale temp files', async () => {
   const dir = process.env.IMAGE_CACHE_DIR;
   fs.mkdirSync(dir, { recursive: true });

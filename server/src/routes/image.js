@@ -6,7 +6,7 @@ import { parsePhone, formatPhone, guessCountry } from '../lib/phone.js';
 import { render } from '../lib/templates.js';
 import { lookupNumber, LookupError } from '../lib/lookup.js';
 import { imageLimiter } from '../middleware/rateLimit.js';
-import { renderCard, getCachedImage, storeImage, CARD_WIDTH, CARD_HEIGHT } from '../lib/imageRenderer.js';
+import { renderCard, getCachedImage, storeImage, isDeadBrowserError, CARD_WIDTH, CARD_HEIGHT } from '../lib/imageRenderer.js';
 import { config } from '../config.js';
 import { logger } from '../lib/logger.js';
 
@@ -76,6 +76,12 @@ export function createImageRouter({ cache }) {
     } catch (err) {
       if (err instanceof LookupError) {
         return res.status(err.status).type('text/plain').send(err.message);
+      }
+      if (isDeadBrowserError(err)) {
+        // The browser crashed repeatedly under this request; it is relaunched
+        // for the next one, so ask clients (and link unfurlers) to retry.
+        logger.warn('card_render_browser_unavailable', { number, message: err.message });
+        return res.status(503).set('Retry-After', '3').type('text/plain').send('The image renderer is restarting. Please retry in a few seconds.');
       }
       logger.error('card_render_failed', { number, message: err.message, stack: err.stack });
       return res.status(500).type('text/plain').send('Could not generate the image right now. Please try again later.');

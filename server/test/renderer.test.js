@@ -38,6 +38,17 @@ function tarTopLevelNames(buffer) {
   return names;
 }
 
+test('looksLikeFont accepts sfnt/OpenType/collection magic and rejects other bodies', () => {
+  const pad = (magic) => Buffer.concat([Buffer.from(magic, 'latin1'), Buffer.alloc(2048)]);
+  assert.equal(renderer.looksLikeFont(pad('\u0000\u0001\u0000\u0000')), true, 'TrueType');
+  assert.equal(renderer.looksLikeFont(pad('OTTO')), true, 'CFF OpenType');
+  assert.equal(renderer.looksLikeFont(pad('true')), true, 'Apple TrueType');
+  assert.equal(renderer.looksLikeFont(pad('ttcf')), true, 'collection');
+  assert.equal(renderer.looksLikeFont(Buffer.from('<html>captive portal</html>'.padEnd(4096, ' '))), false);
+  assert.equal(renderer.looksLikeFont(Buffer.from('OTTO')), false, 'too small to be a font');
+  assert.equal(renderer.looksLikeFont(null), false);
+});
+
 test('cleanup list covers everything @sparticuz/chromium extracts into the temp dir', (t) => {
   let binDir;
   try {
