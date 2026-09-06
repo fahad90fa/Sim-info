@@ -16,17 +16,20 @@
  *   the next render launches again.
  * - A browser that dies is dropped by whoever notices first; everybody else
  *   joins the single replacement launch.
+ * - A font swap launches the replacement first and retires the old browser
+ *   only once the new one is up; if the launch fails the old one keeps
+ *   serving.
  *
  * Font invariants (serverless only, see "extra fonts" below):
- * - `fontState.diskVersion` counts successful font downloads; every browser
- *   records the version it launched with. A render is complete only when its
- *   browser's version is current and every configured font is on disk or
- *   given up on. There is no flag to lose: a stale browser is swapped by the
- *   next render that finds it, and a browser launched while a download was
- *   in flight is simply stale afterwards.
+ * - Every browser records which extra font files existed right before it
+ *   started (fontconfig scans /tmp/fonts once at startup). A browser is stale
+ *   when a font file it did not see is now on disk; the next render swaps
+ *   it. A render is complete only when its browser is not stale and every
+ *   configured font is on disk or given up on.
  */
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
+import crypto from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { config } from '../config.js';
@@ -130,14 +133,14 @@ async function cleanupServerlessChromium({ keepFonts = false } = {}) {
  *   the background so they never stall a request; a browser that started
  *   before a font arrived is swapped for a fresh one by the next render.
  * - A URL that answers 404/410, serves something that is not a font, or fails
- *   three times is given up on, so completeness (and caching) is judged on
- *   the fonts that can arrive.
+ *   three times is given up on, so completeness (and caching in memory) is
+ *   judged on the fonts that can arrive. Cards rendered while a URL is given
+ *   up are not written to the disk cache, which outlives this process.
  */
 const FONT_MAX_ATTEMPTS = 3;
 const FONT_DOWNLOAD_TIMEOUT_MS = 15_000;
 const fontState = {
   managing: false, // true once the @sparticuz build is in use for this process
-  diskVersion: 0, // bumped whenever a font file lands on disk
   retryAt: 0,
   inFlight: null,
   failures: new Map(), // url -> failed attempts
@@ -145,10 +148,13 @@ const fontState = {
   warnedInvalid: false,
 };
 
+/** On-disk name: keyed by the full URL so two fonts with the same basename cannot alias. */
 const fontFileFor = (url) => {
   try {
-    const name = path.basename(new URL(url).pathname) || 'font.ttf';
-    return path.join(os.tmpdir(), 'fonts', name);
+    const parsed = new URL(url);
+    const base = path.basename(parsed.pathname) || 'font.ttf';
+    const key = crypto.createHash('sha1').update(url).digest('hex').slice(0, 8);
+    return path.join(os.tmpdir(), 'fonts', `${key}-${base}`);
   } catch {
     return null;
   }
@@ -161,6 +167,14 @@ const warnInvalidFontUrls = () => {
     if (!fontFileFor(url)) logger.warn('serverless_font_invalid_url', { url, hint: 'check CARD_FONT_URLS' });
   }
 };
+
+/** Font files currently on disk, as a Set of paths. */
+const presentFontFiles = () =>
+  new Set(
+    config.puppeteer.fontUrls
+      .map(fontFileFor)
+      .filter((file) => file && fsSync.existsSync(file)),
+  );
 
 /** Every configured font is on disk or given up on (invalid URLs are skipped). */
 const fontsComplete = () =>
@@ -208,7 +222,6 @@ function ensureServerlessFonts() {
         logger.warn('serverless_font_given_up', { url: r.url, attempts, reason: r.message });
       }
     }
-    if (added) fontState.diskVersion += 1;
     const complete = fontsComplete();
     if (!complete) fontState.retryAt = Date.now() + config.puppeteer.fontRetryMs;
     return { complete, added };
@@ -259,7 +272,7 @@ function refreshFontsInBackground() {
  */
 export function cardFontsReady() {
   if (!fontState.managing) return true;
-  return fontsComplete() && (!currentBrowser || browserFontVersion.get(currentBrowser) === fontState.diskVersion);
+  return fontsComplete() && (!currentBrowser || !isStale(currentBrowser));
 }
 
 /**
@@ -297,29 +310,57 @@ async function resolveServerlessChromium() {
 // --- shared browser --------------------------------------------------------
 let browserPromise = null; // launch (pending or settled) of the tracked browser
 let currentBrowser = null; // the tracked browser once its launch resolved
+let swapInProgress = false; // a font-swap launch is pending while the old browser keeps serving
 const inFlight = new Map(); // browser -> renders currently using it
 const retired = new Set(); // browsers replaced while still serving renders
-const browserFontVersion = new WeakMap(); // browser -> fontState.diskVersion when it started
+const browserFonts = new WeakMap(); // browser -> Set of font files present when it started
 
 class LaunchCancelledError extends Error {
-  constructor() {
-    super('Browser launch was cancelled');
+  constructor(message = 'Browser launch was cancelled') {
+    super(message);
     this.name = 'LaunchCancelledError';
   }
 }
 
-function launchBrowser() {
+class BrowserUnavailableError extends Error {
+  constructor() {
+    super('Browser unavailable: launch was cancelled repeatedly');
+    this.name = 'BrowserUnavailableError';
+  }
+}
+
+/** A browser is stale when a font file it did not see at startup is now on disk. */
+function isStale(browser) {
+  if (!fontState.managing) return false;
+  const seen = browserFonts.get(browser);
+  if (!seen) return false;
+  for (const file of presentFontFiles()) if (!seen.has(file)) return true;
+  return false;
+}
+
+/** Close `browser` now, or once the renders still using it have finished. */
+function retireBrowser(browser) {
+  if ((inFlight.get(browser) ?? 0) > 0) retired.add(browser);
+  else browser.close().catch(() => {});
+}
+
+/**
+ * Launch a browser. With `replacing`, the launch is a font swap: the old
+ * browser keeps serving until the new one is up, and is kept if the launch
+ * fails.
+ */
+function launchBrowser({ replacing = null } = {}) {
   const launch = (async () => {
     const serverless = config.puppeteer.executablePath ? null : await resolveServerlessChromium();
     const executablePath = serverless?.executablePath ?? (await resolveExecutablePath());
     if (!executablePath) {
       throw new Error('No Chrome/Chromium binary found. Set PUPPETEER_EXECUTABLE_PATH or install Chromium.');
     }
-    // Fontconfig scans /tmp/fonts once at startup: what is on disk now is all
-    // this browser will ever see. A download finishing during the launch just
-    // makes the browser stale, and the next render swaps it.
-    const fontVersionAtLaunch = fontState.diskVersion;
     const { default: puppeteer } = await import('puppeteer-core');
+    // Fontconfig scans /tmp/fonts once at startup: record what is on disk
+    // right now. A file landing after this point makes the browser stale and
+    // the next render swaps it (a rare unnecessary swap is the safe error).
+    const fontsSeen = presentFontFiles();
     let browser;
     try {
       browser = await puppeteer.launch({
@@ -344,16 +385,28 @@ function launchBrowser() {
         logger.warn('serverless_chromium_launch_failed_cleaning_tmp', { message: err.message });
         await cleanupServerlessChromium({ keepFonts: true });
       }
+      if (replacing && browserPromise === launch && currentBrowser === replacing && replacing.connected) {
+        // The swap failed: keep serving with the old browser and try again later.
+        logger.warn('browser_swap_failed_keeping_old', { message: err.message });
+        browserPromise = Promise.resolve(replacing);
+        throw new LaunchCancelledError('Browser swap failed; the previous browser stays in use');
+      }
       throw err;
     }
     if (browserPromise !== launch) {
-      // closeBrowser() (or a font swap) ran while we were launching.
+      // closeBrowser() or a crash of the old browser ran while we were launching.
       await browser.close().catch(() => {});
       throw new LaunchCancelledError();
     }
+    const previous = currentBrowser;
     currentBrowser = browser;
-    browserFontVersion.set(browser, fontVersionAtLaunch);
+    browserFonts.set(browser, fontsSeen);
     stats.launches += 1;
+    if (previous && previous !== browser) {
+      retireBrowser(previous);
+      if (replacing) stats.relaunchesForFonts += 1;
+      logger.info('browser_replaced', { reason: replacing ? 'fonts arrived' : 'relaunch' });
+    }
     browser.on('disconnected', () => {
       inFlight.delete(browser);
       retired.delete(browser);
@@ -365,6 +418,12 @@ function launchBrowser() {
     logger.info('browser_launched', { executablePath });
     return browser;
   })();
+  if (replacing) {
+    swapInProgress = true;
+    launch.catch(() => {}).finally(() => {
+      swapInProgress = false;
+    });
+  }
   return launch;
 }
 
@@ -381,6 +440,7 @@ function dropBrowser(browser) {
  * failure rejects every render waiting on it; the next render tries again.
  */
 export async function getBrowser() {
+  let cancellations = 0;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     let awaited = browserPromise;
     if (!awaited) {
@@ -392,29 +452,31 @@ export async function getBrowser() {
       browser = await awaited;
     } catch (err) {
       if (browserPromise === awaited) browserPromise = null;
-      if (err instanceof LaunchCancelledError) continue; // join or start the replacement
+      if (err instanceof LaunchCancelledError) {
+        // Not a failure of this render: join or start the replacement.
+        cancellations += 1;
+        if (cancellations > 5) throw new BrowserUnavailableError();
+        attempt -= 1;
+        continue;
+      }
       throw err;
     }
     if (browser.connected) return browser;
     dropBrowser(browser); // died between launch and use; the loop relaunches once
   }
-  throw new Error('Could not obtain a browser');
+  throw new BrowserUnavailableError();
 }
 
 /**
- * Swap the tracked browser for a fresh one when fonts arrived after it
- * started. Renders still using the old instance finish first; it is closed
- * when the last of them releases it. Returns true when a swap happened.
+ * Start a font swap when the tracked browser is stale: launch the replacement
+ * and let the old browser serve until it is up. Returns true when a swap was
+ * started.
  */
 function replaceStaleBrowser() {
   const old = currentBrowser;
-  if (!old || browserFontVersion.get(old) === fontState.diskVersion) return false;
-  currentBrowser = null;
-  browserPromise = null;
-  if ((inFlight.get(old) ?? 0) > 0) retired.add(old);
-  else old.close().catch(() => {});
-  stats.relaunchesForFonts += 1;
-  logger.info('browser_replaced', { reason: 'fonts arrived' });
+  if (!old || swapInProgress || !isStale(old)) return false;
+  logger.info('browser_swap_started', { reason: 'fonts arrived' });
+  browserPromise = launchBrowser({ replacing: old });
   return true;
 }
 
@@ -448,15 +510,18 @@ const release = () => {
 };
 
 export const isDeadBrowserError = (err) =>
+  err instanceof BrowserUnavailableError ||
   /Target closed|Protocol error|Connection closed|browser has disconnected|Session closed/i.test(err?.message ?? '');
 
 const RENDER_ATTEMPTS = 3;
 
 /**
  * Render an HTML string to a PNG at the card size.
- * @returns {Promise<{ png: Buffer, complete: boolean }>} `complete` is false
- * when the browser that rendered lacked some configured font (serverless
- * only); callers should serve such a card but not cache it.
+ * @returns {Promise<{ png: Buffer, complete: boolean, persist: boolean }>}
+ * `complete` is false when the browser that rendered lacked a font that can
+ * still arrive (serverless only): serve the card but do not cache it.
+ * `persist` is additionally false while some font URL has been given up on:
+ * keep such cards out of the disk cache, which outlives this process.
  */
 export async function renderCard(html, options = {}) {
   for (let attempt = 1; ; attempt += 1) {
@@ -476,6 +541,17 @@ export async function renderHtmlToPng(html, options = {}) {
   return (await renderCard(html, options)).png;
 }
 
+/** Wait (bounded) for every <img> in the page to finish loading or failing. */
+const WAIT_FOR_IMAGES = (timeoutMs) =>
+  Promise.race([
+    Promise.all(
+      Array.from(document.images).map((img) =>
+        img.complete ? null : new Promise((resolve) => img.addEventListener('load', resolve, { once: true }) || img.addEventListener('error', resolve, { once: true })),
+      ),
+    ),
+    new Promise((resolve) => setTimeout(resolve, timeoutMs)),
+  ]).then(() => document.fonts?.ready);
+
 async function renderOnce(html, { timeoutMs = 20_000 } = {}) {
   await acquire();
   let browser;
@@ -489,19 +565,20 @@ async function renderOnce(html, { timeoutMs = 20_000 } = {}) {
     useBrowser(browser);
     page = await browser.newPage();
     await page.setViewport({ width: CARD_WIDTH, height: CARD_HEIGHT, deviceScaleFactor: 1 });
-    // networkidle0 lets remote thumbnails finish loading; the timeout keeps a
-    // dead image host from blocking the render forever.
-    await page.setContent(html, { waitUntil: 'networkidle0', timeout: timeoutMs }).catch((err) => {
+    // Wait for the document, then explicitly for images (remote thumbnails)
+    // and fonts. This is much cheaper than networkidle0, which idles for a
+    // fixed window after the last request.
+    await page.setContent(html, { waitUntil: 'load', timeout: timeoutMs }).catch((err) => {
       logger.warn('card_setcontent_timeout', { message: err.message });
     });
-    await page.evaluate(() => document.fonts?.ready).catch(() => {});
+    await page.evaluate(WAIT_FOR_IMAGES, timeoutMs).catch(() => {});
     const png = await page.screenshot({
       type: 'png',
       clip: { x: 0, y: 0, width: CARD_WIDTH, height: CARD_HEIGHT },
     });
-    const complete =
-      !fontState.managing || (browserFontVersion.get(browser) === fontState.diskVersion && fontsComplete());
-    return { png, complete };
+    const complete = !fontState.managing || (!isStale(browser) && fontsComplete());
+    const persist = complete && fontState.givenUp.size === 0;
+    return { png, complete, persist };
   } catch (err) {
     if (browser && isDeadBrowserError(err)) dropBrowser(browser);
     throw err;
@@ -550,8 +627,14 @@ function remember(number, buffer, expires) {
   memory.set(number, { buffer, expires });
 }
 
-export async function storeImage(number, buffer) {
+/**
+ * Cache a rendered card. `disk: false` keeps it in this process's memory only
+ * (used for cards that are complete for this process but were rendered while
+ * a font URL was given up on).
+ */
+export async function storeImage(number, buffer, { disk = true } = {}) {
   remember(number, buffer, Date.now() + config.cache.imageTtlSeconds * 1000);
+  if (!disk) return;
   try {
     await fs.mkdir(config.paths.imageCacheDir, { recursive: true });
     const file = cachePathFor(number);
@@ -613,11 +696,11 @@ export async function closeBrowser() {
   const toClose = [...retired];
   retired.clear();
   if (current) toClose.push(current);
-  else if (pending) {
+  if (pending) {
     // A launch in progress: its tail closes the browser itself and rejects
     // with LaunchCancelledError, but close it here too if it already resolved.
     const browser = await pending.catch(() => null);
-    if (browser && browser !== currentBrowser) toClose.push(browser);
+    if (browser && browser !== currentBrowser && !toClose.includes(browser)) toClose.push(browser);
   }
   await Promise.all(toClose.map((b) => b.close().catch(() => {})));
 }

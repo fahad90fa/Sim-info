@@ -162,8 +162,9 @@ download fails, cards are still served but not cached; the download is retried i
 background after five minutes (`CARD_FONT_RETRY_MS`) without delaying any request, the
 browser is swapped for a fresh one once the font arrives, and a URL that answers 404,
 serves something that is not a font, or fails three times is given up on so caching
-resumes with the fonts that did load. Only the first launch of an instance waits for
-the downloads. The
+resumes with the fonts that did load (in memory only; such cards stay out of the disk
+cache, which outlives the process). Only the first launch of an instance waits for the
+downloads. The
 install commands pass `--include=dev` so a `NODE_ENV=production` build variable
 cannot skip the client's build tooling.
 

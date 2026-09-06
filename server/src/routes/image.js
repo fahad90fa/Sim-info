@@ -64,9 +64,11 @@ export function createImageRouter({ cache }) {
             // A card rendered by a browser that lacked a font (a failed download
             // at cold start) may miss emoji or Urdu/Hindi glyphs; serve it, but
             // do not cache it anywhere.
-            const { png, complete } = await renderCard(html);
-            if (complete) await storeImage(number, png);
-            logger.info('card_rendered', { number, ms: Date.now() - started, bytes: png.length, fontsComplete: complete });
+            const { png, complete, persist } = await renderCard(html);
+            // Cards rendered while a font URL was given up on stay out of the
+            // disk cache, which outlives this process (a later one may have the font).
+            if (complete) await storeImage(number, png, { disk: persist });
+            logger.info('card_rendered', { number, ms: Date.now() - started, bytes: png.length, fontsComplete: complete, persisted: persist });
             return { png, complete };
           })().finally(() => rendering.delete(number)),
         );
