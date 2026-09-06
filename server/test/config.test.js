@@ -19,6 +19,7 @@ const PROBE = `
     imageCacheDir: config.paths.imageCacheDir, logFile: config.logFile,
     lookupMock: config.lookup.mock, port: config.port,
     nodeEnv: config.nodeEnv, isProduction: config.isProduction, fontUrls: config.puppeteer.fontUrls.length,
+    imageMaxFiles: config.cache.imageMaxFiles,
   }));
 `;
 
@@ -59,6 +60,12 @@ test('serverless ignores non-/tmp IMAGE_CACHE_DIR and LOG_FILE but honours /tmp 
   assert.equal(good.imageCacheDir, path.join(os.tmpdir(), 'x'));
   assert.equal(good.logFile, path.join(os.tmpdir(), 'y', 'l.log'));
   assert.equal(probe({ VERCEL: '1', IMAGE_CACHE_DIR: os.tmpdir() }).imageCacheDir, os.tmpdir(), 'the temp dir itself is writable');
+});
+
+test('a negative image cache cap disables the cap instead of deleting everything', () => {
+  assert.equal(probe({ IMAGE_CACHE_MAX_FILES: '-5' }).imageMaxFiles, 0);
+  assert.equal(probe({ IMAGE_CACHE_MAX_FILES: '0' }).imageMaxFiles, 0);
+  assert.equal(probe({}).imageMaxFiles, 200);
 });
 
 test('card font downloads can be disabled', () => {

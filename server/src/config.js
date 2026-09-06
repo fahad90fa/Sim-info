@@ -115,7 +115,7 @@ export const config = {
     redisUrl: env('REDIS_URL', ''),
     imageTtlSeconds: int('IMAGE_CACHE_TTL_SECONDS', 7 * 24 * 60 * 60),
     // Upper bound on cached PNG files on disk (oldest evicted first); 0 disables the cap.
-    imageMaxFiles: int('IMAGE_CACHE_MAX_FILES', 200),
+    imageMaxFiles: Math.max(0, int('IMAGE_CACHE_MAX_FILES', 200)),
   },
   rateLimit: {
     windowMs: int('RATE_LIMIT_WINDOW_MS', 60_000),

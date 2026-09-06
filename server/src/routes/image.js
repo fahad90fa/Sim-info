@@ -6,7 +6,7 @@ import { parsePhone, formatPhone, guessCountry } from '../lib/phone.js';
 import { render } from '../lib/templates.js';
 import { lookupNumber, LookupError } from '../lib/lookup.js';
 import { imageLimiter } from '../middleware/rateLimit.js';
-import { renderHtmlToPng, getCachedImage, storeImage, cardFontsReady, CARD_WIDTH, CARD_HEIGHT } from '../lib/imageRenderer.js';
+import { renderCard, getCachedImage, storeImage, CARD_WIDTH, CARD_HEIGHT } from '../lib/imageRenderer.js';
 import { config } from '../config.js';
 import { logger } from '../lib/logger.js';
 
@@ -61,10 +61,10 @@ export function createImageRouter({ cache }) {
             const started = Date.now();
             const result = await lookupNumber(number, cache);
             const html = await buildCardHtml(number, result);
-            const png = await renderHtmlToPng(html);
-            // A card rendered while a font download had failed may lack emoji
-            // or Urdu/Hindi glyphs; serve it, but do not cache it anywhere.
-            const complete = cardFontsReady();
+            // A card rendered by a browser that lacked a font (a failed download
+            // at cold start) may miss emoji or Urdu/Hindi glyphs; serve it, but
+            // do not cache it anywhere.
+            const { png, complete } = await renderCard(html);
             if (complete) await storeImage(number, png);
             logger.info('card_rendered', { number, ms: Date.now() - started, bytes: png.length, fontsComplete: complete });
             return { png, complete };

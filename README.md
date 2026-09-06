@@ -158,8 +158,10 @@ cache backend connects on the first request. `TRUST_PROXY` defaults to `1`,
 skipped whenever `VERCEL` or an AWS Lambda variable is present. Rate limits are per
 function instance. Both layouts set `maxDuration` to 60 s; a cold image render
 (Chromium extraction, browser launch, font downloads) takes roughly 5 s. If a font
-download fails, cards are still served but not cached, and the download is retried
-after five minutes. The
+download fails, cards are still served but not cached; the download is retried in the
+background after five minutes (`CARD_FONT_RETRY_MS`), the browser is swapped for a
+fresh one once the font arrives, and a URL that keeps failing is given up on after
+three attempts so caching resumes with the fonts that did load. The
 install commands pass `--include=dev` so a `NODE_ENV=production` build variable
 cannot skip the client's build tooling.
 
